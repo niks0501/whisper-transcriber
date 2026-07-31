@@ -1,5 +1,29 @@
 .env
-.venv
-/*m4a
-/*mp3
-/*wav
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Interview recordings and speaker references
+*.flac
+*.m4a
+*.mp3
+*.mp4
+*.mpeg
+*.mpga
+*.ogg
+*.wav
+*.webm
+speaker_references/
+recordings/
+
+# Generated transcript data may contain sensitive participant information
+transcription_output/
+
+# Local/private configuration
+config/*.yaml
+!config/*.example.yaml
+config/*.txt
+!config/*.example.txt

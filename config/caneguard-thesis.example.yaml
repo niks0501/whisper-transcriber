@@ -1,0 +1,26 @@
+project:
+  title: CaneGuard
+  topic: Sugarcane disease detection using a mobile application
+
+interview:
+  organization: Sugar Regulatory Administration
+  location: Don Pedro Mill
+  participant_labels:
+    - Interviewer
+    - SRA Staff
+
+research_questions:
+  - What sugarcane diseases are commonly encountered?
+  - How are sugarcane diseases currently identified?
+  - What difficulties affect field diagnosis?
+  - What features would make CaneGuard useful?
+
+analysis:
+  include_summary: true
+  include_themes: true
+  include_timestamped_quotes: true
+  include_follow_up_questions: true
+
+privacy:
+  anonymize_participants: false
+  redact_contact_information: true
