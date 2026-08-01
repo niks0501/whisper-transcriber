@@ -13,6 +13,12 @@ The default workflow uses `gpt-4o-transcribe-diarize` to detect who spoke and wh
 - Optional known-speaker reference samples
 - Interactive or command-based speaker renaming
 - Retry and resume support with per-chunk checkpoints
+- **Duration-aware chunking** for long recordings (5-minute chunks by default)
+- **Controlled retry policy** with automatic retry disabled in the SDK
+- **Provisional outputs** visible after every completed chunk
+- **Persistent manifest** with fingerprint validation to prevent mis-matched resumption
+- **Post-process isolation** — transcription completes independently of cleanup/analysis
+- **Status command** (`--status`) to inspect runs in progress
 - TXT, JSON, SRT, and VTT exports
 - Verbatim and readable transcript copies
 - Sugarcane terminology glossary review
@@ -86,6 +92,8 @@ Defaults:
 - transcript copies: verbatim and readable
 - exports: TXT, JSON, SRT, and VTT
 - retries and resume: enabled
+- chunk size: 5 minutes with 2-second boundary overlap on long recordings
+- max attempts per chunk: 2 (one initial request plus one retry)
 
 Without voice references, detected voices are labelled automatically. The exact raw label may be `A`, `B`, `Speaker A`, or another model-provided label.
 
@@ -306,9 +314,38 @@ The source file's SHA-256 checksum prevents accidental reuse of an output folder
 
 ## Large recordings
 
-Files below the conservative upload threshold are sent as-is. Larger recordings are converted into temporary mono, 16 kHz, 64 kbps MP3 chunks of approximately 15 minutes each. The original file is never modified.
+Recordings longer than 5 minutes or larger than 20 MB are automatically split into speech-optimized chunks of approximately 5 minutes each. The original file is never modified.
 
-When a large interview is divided into multiple requests, anonymous A/B speaker labels may not remain consistent between chunks. Known-speaker samples improve consistency.
+- Duration-and-size-aware chunking (not size-only)
+- Five-minute chunks with 2-second boundary overlap
+- Provisional transcript files appear after the first chunk completes
+- `Ctrl+C` preserves all completed chunks for safe resume
+- Resume automatically detects and reuses completed chunks
+- Run fingerprint prevents accidental reuse with changed settings
+
+Advanced chunk tuning:
+
+```powershell
+python transcribe.py "audio.m4a" --chunk-seconds 300 --chunk-overlap-seconds 2
+```
+
+When a large interview is divided into multiple requests, anonymous speaker labels may not remain consistent between chunks. Known-speaker samples improve consistency.
+
+### Inspect a running or completed transcription
+
+```powershell
+python transcribe.py "recordings\SRA-interview.m4a" --status
+```
+
+This shows completed chunk count, processed duration, current stage, and any last error.
+
+### Rerun only post-processing
+
+```powershell
+python transcribe.py "recordings\SRA-interview.m4a" --postprocess-only
+```
+
+This skips transcription entirely and re-runs readable cleanup, glossary review, and research analysis from existing outputs.
 
 ## Output structure
 
@@ -330,17 +367,26 @@ transcription_output/
         └── results/
 ```
 
-Not every optional file is created on every run.
+Not every optional file is created on every run. During long-audio transcription, `.partial` files appear as chunks complete.
 
 Important files:
 
 - `raw_transcript.json`: model segments and raw API responses;
-- `run_manifest.json`: source checksum, progress, model, and completion state;
+- `run_manifest.json`: schema version, run fingerprint, source checksum, chunk statuses, stage progress, attempt records;
 - `verbatim_transcript.txt`: timestamped speaker-labelled transcript;
 - `readable_transcript.txt`: optional cleaned copy;
 - `transcript.srt` and `transcript.vtt`: subtitles for review;
 - `review_flags.json`: terminology requiring manual checking;
 - `research_analysis.md`: optional thesis research notes.
+
+### Manifest
+
+The `run_manifest.json` now uses schema version 2 and contains:
+
+- **Run fingerprint**: a deterministic hash of source, model, language, speaker references, chunk policy, and request settings. Mismatches prevent accidental reuse.
+- **Chunk records**: per-chunk status, attempt history with timing, raw result paths, and segment counts.
+- **Stage status**: transcription, rendering, readable, glossary, and analysis each track their own state (`pending`, `running`, `completed`, or `failed`).
+- **Atomic writes**: the manifest is never left in a partial state on disk.
 
 ## Command reference
 
@@ -365,9 +411,26 @@ Common options:
 --research-context FILE
 --analysis-model MODEL_ID
 --output DIRECTORY
---retries NUMBER
 --no-resume
 --overwrite
+```
+
+Long-audio and retry options:
+
+```text
+--chunk-seconds 300          (target chunk duration)
+--chunk-overlap-seconds 2    (boundary overlap)
+--request-timeout 600        (per-request timeout in seconds)
+--max-attempts 2             (API attempts per chunk, including first)
+--retries N                  (deprecated; maps to --max-attempts)
+```
+
+Workflow control:
+
+```text
+--transcribe-only            (skip readable cleanup and analysis)
+--postprocess-only           (skip transcription, run cleanup only)
+--status                     (show run progress and exit)
 ```
 
 Show built-in help:
@@ -389,9 +452,9 @@ It forwards all arguments to the new CLI. Editing a hard-coded `INPUT_FILE` vari
 ## Testing
 
 ```powershell
-python -m compileall -q transcribe.py transcribe_auto_split.py
+python -m compileall -q transcriber/ transcribe.py transcribe_auto_split.py tests/
 python -m unittest discover -s tests -v
 python transcribe.py --help
 ```
 
-The unit tests and help check do not call the OpenAI API or upload audio.
+The unit and integration tests do not call the OpenAI API or upload audio. Integration tests use a fake client to verify chunk planning, retry classification, manifest persistence, overlap deduplication, and configuration fingerprint validation.

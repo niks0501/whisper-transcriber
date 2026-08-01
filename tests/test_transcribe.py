@@ -1,6 +1,7 @@
 import unittest
 
-from transcribe import assignment, clock, subtitle
+from transcriber.cli import assignment
+from transcriber.renderers import clock, subtitle
 
 
 class TranscriberHelpersTest(unittest.TestCase):
