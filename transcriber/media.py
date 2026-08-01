@@ -38,8 +38,11 @@ def require_binary(name: str) -> None:
         raise RuntimeError(f"{name} was not found in PATH. Install FFmpeg and reopen the terminal.")
 
 
-def run_command(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True)
+def run_command(command: list[str], timeout: float = 600.0) -> str:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Command timed out after {timeout:.0f}s: {' '.join(command)}")
     if result.returncode:
         raise RuntimeError(f"Command failed: {' '.join(command)}\n{result.stderr.strip()}")
     return result.stdout.strip()

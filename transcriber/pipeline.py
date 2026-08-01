@@ -5,14 +5,13 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
 import yaml
 from openai import OpenAI
 
-from transcriber.api_client import create_client
 from transcriber.chunking import plan_chunks, extract_all_chunks
 from transcriber.config import RunConfig
 from transcriber.manifest import (
@@ -24,10 +23,10 @@ from transcriber.manifest import (
     atomic_read_json,
     now_iso,
 )
-from transcriber.media import MediaInfo, format_duration, guess_mime, probe, safe_name
-from transcriber.progress import Progress, status_summary
+from transcriber.media import MediaInfo, guess_mime
+from transcriber.progress import Progress
 from transcriber.renderers import segments_from_response, transcript_text, subtitle
-from transcriber.retry import is_retryable, error_name, with_retry
+from transcriber.retry import is_retryable, error_name
 from transcriber.speakers import rename_speakers
 
 
@@ -63,11 +62,9 @@ def transcribe_chunk_api(
             if speakers:
                 kwargs["known_speaker_names"] = [s.name for s in speakers]
                 kwargs["known_speaker_references"] = [as_data_url(s.path) for s in speakers]
-        elif model == "whisper-1":
+        else:
             kwargs["response_format"] = "verbose_json"
             kwargs["timestamp_granularities"] = ["segment"]
-        else:
-            kwargs["response_format"] = "json"
         return to_dict(client.audio.transcriptions.create(**kwargs))
 
 
@@ -91,6 +88,10 @@ def _segments_overlap(a: dict[str, Any], b: dict[str, Any], threshold: float = 0
     return overlap_duration / min_duration >= threshold
 
 
+def _fully_contained(inner: dict[str, Any], outer: dict[str, Any], eps: float = 1e-3) -> bool:
+    return inner["start"] >= outer["start"] - eps and inner["end"] <= outer["end"] + eps
+
+
 def deduplicate_overlaps(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if len(segments) < 2:
         return segments
@@ -99,12 +100,98 @@ def deduplicate_overlaps(segments: list[dict[str, Any]]) -> list[dict[str, Any]]
         is_duplicate = False
         for kept in result:
             if _segments_overlap(seg, kept):
-                if _normalize_text(seg["text"]) == _normalize_text(kept["text"]):
+                same_speaker = seg.get("speaker") == kept.get("speaker")
+                same_text = _normalize_text(seg["text"]) == _normalize_text(kept["text"])
+                if same_speaker and (same_text or _fully_contained(seg, kept)):
                     is_duplicate = True
                     break
         if not is_duplicate:
             result.append(seg)
     return result
+
+
+class ChunkTerminalFailure(RuntimeError):
+    def __init__(self, records: list[dict[str, Any]], message: str):
+        super().__init__(message)
+        self.records = records
+
+
+def _transcribe_one_chunk(
+    client: OpenAI,
+    config: RunConfig,
+    chunk_id: str,
+    chunk_path: Path,
+    max_attempts: int,
+) -> tuple[dict[str, Any], list[dict[str, Any]], float]:
+    records: list[dict[str, Any]] = []
+    for attempt_num in range(1, max_attempts + 1):
+        started = now_iso()
+        t0 = time.monotonic()
+        try:
+            payload = transcribe_chunk_api(
+                client, chunk_path, config.model, config.language, config.speakers,
+            )
+            elapsed = time.monotonic() - t0
+            records.append({
+                "attempt": attempt_num,
+                "started_at": started,
+                "finished_at": now_iso(),
+                "elapsed_seconds": round(elapsed, 2),
+                "status": "succeeded",
+                "request_id": None,
+            })
+            return payload, records, elapsed
+        except Exception as exc:
+            elapsed = time.monotonic() - t0
+            retryable = is_retryable(exc)
+            records.append({
+                "attempt": attempt_num,
+                "started_at": started,
+                "finished_at": now_iso(),
+                "elapsed_seconds": round(elapsed, 2),
+                "status": "failed",
+                "error_type": error_name(exc),
+                "request_id": None,
+                "retryable": retryable,
+            })
+            if not retryable or attempt_num == max_attempts:
+                raise ChunkTerminalFailure(
+                    records,
+                    f"{chunk_id} failed after {attempt_num} attempt(s): {exc}",
+                ) from exc
+            delay = min(2 ** (attempt_num - 1), 8)
+            print(f"  {chunk_id} failed (attempt {attempt_num}/{max_attempts}); retrying in {delay}s: {exc}")
+            time.sleep(delay)
+    raise ChunkTerminalFailure(records, f"{chunk_id} failed after {max_attempts} attempts")
+
+
+def _acquire_output_lock(output_dir: Path):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:
+        return True, None
+    lock_path = output_dir / ".run.lock"
+    try:
+        fd = lock_path.open("w")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fd:
+            fd.close()
+        return False, None
+    return True, fd
+
+
+def _release_output_lock(lock_fd) -> None:
+    if lock_fd is None:
+        return
+    try:
+        import fcntl
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    finally:
+        lock_fd.close()
 
 
 def run_pipeline(
@@ -114,18 +201,31 @@ def run_pipeline(
     no_resume: bool = False,
     transcribe_only: bool = False,
     postprocess_only: bool = False,
+    speaker_labels: dict[str, str] | None = None,
+    map_speakers: bool = False,
+    max_failed_chunks: int | None = None,
+    max_total_attempts: int | None = None,
 ) -> int:
-    try:
-        return _run(
-            config, output, client, no_resume=no_resume,
-            transcribe_only=transcribe_only, postprocess_only=postprocess_only,
-        )
-    except KeyboardInterrupt:
-        print("\nCancelled. Completed chunks remain available for resume.", file=sys.stderr)
-        return 130
-    except Exception as exc:
-        print(f"\nError: {exc}", file=sys.stderr)
+    acquired, lock_fd = _acquire_output_lock(output)
+    if not acquired:
+        print("Another transcription run is already using this output directory.", file=sys.stderr)
         return 1
+    try:
+        try:
+            return _run(
+                config, output, client, no_resume=no_resume,
+                transcribe_only=transcribe_only, postprocess_only=postprocess_only,
+                speaker_labels=speaker_labels, map_speakers=map_speakers,
+                max_failed_chunks=max_failed_chunks, max_total_attempts=max_total_attempts,
+            )
+        except KeyboardInterrupt:
+            print("\nCancelled. Completed chunks remain available for resume.", file=sys.stderr)
+            return 130
+        except Exception as exc:
+            print(f"\nError: {exc}", file=sys.stderr)
+            return 1
+    finally:
+        _release_output_lock(lock_fd)
 
 
 def _run(
@@ -135,18 +235,16 @@ def _run(
     no_resume: bool = False,
     transcribe_only: bool = False,
     postprocess_only: bool = False,
+    speaker_labels: dict[str, str] | None = None,
+    map_speakers: bool = False,
+    max_failed_chunks: int | None = None,
+    max_total_attempts: int | None = None,
 ) -> int:
     work_dir = output_dir / "working"
     audio_dir = work_dir / "audio"
     results_dir = work_dir / "results"
     manifest_path = output_dir / "run_manifest.json"
     run_fingerprint = config.fingerprint()
-
-    if os.path.exists(manifest_path) and not no_resume and not config.text_policy.analyze == False:
-        pass
-
-    def _manifest_msg(msg: str) -> None:
-        pass
 
     should_make_new = True
     if not os.path.exists(manifest_path) or no_resume:
@@ -211,11 +309,12 @@ def _run(
 
     if not postprocess_only:
         manifest.set_current_stage("prepare")
-        if should_make_new:
-            extract_all_chunks(manifest.chunk_plan, config.source, audio_dir, config.chunk_policy)
-            for item in manifest.chunk_plan:
+        extract_all_chunks(manifest.chunk_plan, config.source, audio_dir, config.chunk_policy)
+        for item in manifest.chunk_plan:
+            record = manifest.chunks.get(item["id"])
+            if record is None or record.status != ChunkStatus.COMPLETED.value:
                 manifest.set_chunk_status(item["id"], ChunkStatus.PREPARED.value, raw_result=None)
-            manifest.save()
+        manifest.save()
 
         manifest.set_current_stage("transcribe")
         total_chunks = len(manifest.chunk_plan)
@@ -224,6 +323,7 @@ def _run(
 
         results_dir.mkdir(parents=True, exist_ok=True)
 
+        pending: list[tuple[int, dict[str, Any], Path]] = []
         for index, item in enumerate(manifest.chunk_plan, 1):
             chunk_id = item["id"]
             chunk_record = manifest.chunks.get(chunk_id)
@@ -240,86 +340,93 @@ def _run(
                             item["end_seconds"] - item["start_seconds"],
                         )
                     )
-                    chunk_end = item["end_seconds"]
-                    progress.chunk_done(chunk_id, chunk_end, 0.0)
+                    progress.chunk_done(chunk_id, item["end_seconds"], 0.0)
                     continue
 
-            print(f"[{index}/{total_chunks}] Transcribing {chunk_id}")
+            chunk_path = Path(item["path"]) if item.get("path") else None
+            if chunk_path is None or not chunk_path.exists():
+                raise RuntimeError(
+                    f"Chunk audio missing for {chunk_id}: {chunk_path}. "
+                    f"Rerun without --postprocess-only to re-extract."
+                )
 
+            print(f"[{index}/{total_chunks}] Transcribing {chunk_id}")
             manifest.set_chunk_status(chunk_id, ChunkStatus.PROCESSING.value)
             manifest.save()
+            pending.append((index, item, chunk_path))
 
-            chunk_path = Path(item["path"]) if item.get("path") else config.source
+        max_attempts = config.request_policy.max_attempts
+        failed_limit = max_failed_chunks if max_failed_chunks is not None else 1
+        attempt_budget = max_total_attempts
+        total_attempts_used = 0
+        failed_chunks = 0
 
-            max_attempts = config.request_policy.max_attempts
-            payload = None
-
-            for attempt_num in range(1, max_attempts + 1):
-                started = now_iso()
-                t0 = time.monotonic()
+        if pending:
+            workers = max(1, config.request_policy.workers)
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {
+                    pool.submit(_transcribe_one_chunk, client, config, item["id"], chunk_path, max_attempts): (index, item)
+                    for index, item, chunk_path in pending
+                }
                 try:
-                    payload = transcribe_chunk_api(
-                        client, chunk_path, config.model, config.language, config.speakers,
-                    )
-                    elapsed = time.monotonic() - t0
-                    manifest.add_attempt(chunk_id, {
-                        "attempt": attempt_num,
-                        "started_at": started,
-                        "finished_at": now_iso(),
-                        "elapsed_seconds": round(elapsed, 2),
-                        "status": "succeeded",
-                        "request_id": None,
-                    })
-                    break
-                except Exception as exc:
-                    elapsed = time.monotonic() - t0
-                    retryable = is_retryable(exc)
-                    manifest.add_attempt(chunk_id, {
-                        "attempt": attempt_num,
-                        "started_at": started,
-                        "finished_at": now_iso(),
-                        "elapsed_seconds": round(elapsed, 2),
-                        "status": "failed",
-                        "error_type": error_name(exc),
-                        "request_id": None,
-                        "retryable": retryable,
-                    })
-                    if not retryable:
-                        manifest.mark_failed(chunk_id, True, manifest.chunks[chunk_id].attempts[-1])
+                    for future in as_completed(futures):
+                        index, item = futures[future]
+                        chunk_id = item["id"]
+                        result_path = results_dir / f"{chunk_id}.json"
+                        try:
+                            payload, records, elapsed = future.result()
+                        except ChunkTerminalFailure as failure:
+                            for record in failure.records[:-1]:
+                                manifest.add_attempt(chunk_id, record)
+                            manifest.mark_failed(chunk_id, True, failure.records[-1])
+                            manifest.save()
+                            failed_chunks += 1
+                            total_attempts_used += len(failure.records)
+                            print(f"  {chunk_id} failed terminally: {failure}")
+                            _cancel_futures(futures)
+                            if attempt_budget is not None and total_attempts_used >= attempt_budget:
+                                raise RuntimeError(
+                                    f"Stopped: total attempt budget of {attempt_budget} exhausted."
+                                )
+                            if failed_chunks >= failed_limit:
+                                raise RuntimeError(
+                                    f"Stopped after {failed_chunks} terminal chunk failure(s): {failure}"
+                                )
+                            continue
+
+                        for record in records:
+                            manifest.add_attempt(chunk_id, record)
+                        total_attempts_used += len(records)
+                        if attempt_budget is not None and total_attempts_used >= attempt_budget:
+                            _cancel_futures(futures)
+                            manifest.save()
+                            raise RuntimeError(
+                                f"Stopped: total attempt budget of {attempt_budget} exhausted."
+                            )
+                        atomic_write_json(result_path, payload)
+                        manifest.mark_completed(
+                            chunk_id,
+                            str(result_path.relative_to(output_dir)),
+                            len(payload.get("segments", [])) if payload else 0,
+                        )
                         manifest.save()
-                        raise
-                    if attempt_num == max_attempts:
-                        manifest.mark_failed(chunk_id, True, manifest.chunks[chunk_id].attempts[-1])
-                        manifest.save()
-                        raise RuntimeError(f"{chunk_id} failed after {max_attempts} attempts: {exc}")
-                    delay = min(2 ** (attempt_num - 1), 8)
-                    print(f"  {chunk_id} failed (attempt {attempt_num}/{max_attempts}); retrying in {delay}s: {exc}")
-                    time.sleep(delay)
 
-            if payload is not None:
-                atomic_write_json(result_path, payload)
-            manifest.mark_completed(
-                chunk_id,
-                str(result_path.relative_to(output_dir)),
-                len(payload.get("segments", [])) if payload else 0,
-            )
-            manifest.save()
+                        chunk_segments = segments_from_response(
+                            payload,
+                            item["start_seconds"],
+                            item["end_seconds"] - item["start_seconds"],
+                        )
+                        all_segments.extend(chunk_segments)
 
-            chunk_segments = segments_from_response(
-                payload,
-                item["start_seconds"],
-                item["end_seconds"] - item["start_seconds"],
-            )
-            all_segments.extend(chunk_segments)
+                        progress.chunk_done(chunk_id, item["end_seconds"], elapsed)
+                        print(progress.format_line(chunk_id))
+                        print(f"Saved: provisional transcript available.\n")
 
-            chunk_end = item["end_seconds"]
-            progress.chunk_done(chunk_id, chunk_end, elapsed)
-
-            print(progress.format_line(chunk_id))
-            print(f"Saved: provisional transcript available.\n")
-
-            if should_save_provisional(total_chunks, index):
-                _save_provisional(output_dir, all_segments, config)
+                        if should_save_provisional(total_chunks, index):
+                            _save_provisional(output_dir, all_segments, config)
+                except KeyboardInterrupt:
+                    _cancel_futures(futures)
+                    raise
 
         all_segments.sort(key=lambda s: (s["start"], s["end"]))
         all_segments = deduplicate_overlaps(all_segments)
@@ -333,6 +440,10 @@ def _run(
     labels: dict[str, str] = {}
     for speaker in config.speakers:
         labels.setdefault(speaker.name, speaker.name)
+    if speaker_labels:
+        labels.update(speaker_labels)
+    if map_speakers or speaker_labels:
+        labels = rename_speakers(all_segments, labels, interactive=bool(map_speakers))
 
     _finalize_transcript_outputs(output_dir, config, all_segments, labels, manifest)
 
@@ -428,6 +539,12 @@ def should_save_provisional(total_chunks: int, current_index: int) -> bool:
     return True
 
 
+def _cancel_futures(futures: dict) -> None:
+    for future in futures:
+        if not future.done():
+            future.cancel()
+
+
 def _finalize_transcript_outputs(
     output_dir: Path,
     config: RunConfig,
@@ -474,10 +591,13 @@ def _finalize_transcript_outputs(
 
 def _load_existing_segments(output_dir: Path) -> list[dict[str, Any]]:
     raw_path = output_dir / "raw_transcript.json"
-    if raw_path.exists():
-        data = atomic_read_json(raw_path)
-        return data.get("segments", [])
-    return []
+    if not raw_path.exists():
+        raise FileNotFoundError(
+            f"No raw_transcript.json found in {output_dir}; nothing to post-process. "
+            f"Run the full transcription first."
+        )
+    data = atomic_read_json(raw_path)
+    return data.get("segments", [])
 
 
 def _text_model_call(client: OpenAI, model: str, prompt: str, max_attempts: int = 2) -> str:

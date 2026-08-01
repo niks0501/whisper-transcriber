@@ -68,14 +68,45 @@ def main(argv: list[str] | None = None) -> int:
         speakers = _build_speakers(args.speaker)
         source_sha = file_hash(source)
         info = probe(source)
+        if info.duration_seconds <= 0:
+            raise ValueError(
+                f"Could not determine a positive audio duration for {source}. "
+                f"Check that the file is valid and complete."
+            )
 
         max_attempts = args.max_attempts
         if max_attempts is None and args.retries is not None:
             max_attempts = args.retries
         if max_attempts is None:
             max_attempts = 2
+        if max_attempts < 1:
+            raise ValueError("--max-attempts/--retries must be at least 1.")
+
+        chunk_target = args.chunk_seconds or 300
+        chunk_overlap = args.chunk_overlap_seconds or 2
+        if chunk_target < 1:
+            raise ValueError("--chunk-seconds must be at least 1.")
+        if chunk_overlap < 0:
+            raise ValueError("--chunk-overlap-seconds cannot be negative.")
+        if chunk_overlap >= chunk_target:
+            raise ValueError(
+                f"--chunk-overlap-seconds ({chunk_overlap}) must be smaller than "
+                f"--chunk-seconds ({chunk_target})."
+            )
 
         analysis_model = args.analysis_model or os.getenv("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
+
+        if speakers and model != "gpt-4o-transcribe-diarize":
+            print(
+                "Warning: --speaker references are only used by the diarize profile "
+                f"({PROFILES['interview']}); ignoring them for model {model}.",
+                file=sys.stderr,
+            )
+
+        speaker_labels: dict[str, str] = {}
+        for value in args.speaker_label:
+            raw, display = assignment(value, "--speaker-label")
+            speaker_labels[raw] = display
 
         config = RunConfig(
             source=source,
@@ -86,8 +117,8 @@ def main(argv: list[str] | None = None) -> int:
             speakers=tuple(speakers),
             exports=frozenset(exports),
             chunk_policy=ChunkPolicy(
-                target_seconds=args.chunk_seconds or 300,
-                overlap_seconds=args.chunk_overlap_seconds or 2,
+                target_seconds=chunk_target,
+                overlap_seconds=chunk_overlap,
             ),
             request_policy=RequestPolicy(
                 timeout_seconds=args.request_timeout or 600,
@@ -106,6 +137,8 @@ def main(argv: list[str] | None = None) -> int:
         output = Path(args.output) / safe_name(source)
         if args.overwrite and output.exists():
             import shutil
+            count = sum(1 for _ in output.rglob("*")) if output.exists() else 0
+            print(f"Overwriting existing output: {output} ({count} files)")
             shutil.rmtree(output)
         output.mkdir(parents=True, exist_ok=True)
 
@@ -118,6 +151,10 @@ def main(argv: list[str] | None = None) -> int:
             no_resume=args.no_resume,
             transcribe_only=args.transcribe_only,
             postprocess_only=args.postprocess_only,
+            speaker_labels=speaker_labels,
+            map_speakers=args.map_speakers,
+            max_failed_chunks=args.max_failed_chunks,
+            max_total_attempts=args.max_total_attempts,
         )
 
     except KeyboardInterrupt:

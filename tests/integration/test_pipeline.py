@@ -52,21 +52,29 @@ class OverlapDeduplicationTest(unittest.TestCase):
         result = deduplicate_overlaps(segments)
         self.assertEqual(len(result), 1)
 
-    def test_near_duplicate_kept(self):
+    def test_near_duplicate_contained_dropped(self):
         segments = [
             {"speaker": "A", "start": 0.0, "end": 5.0, "text": "Hello world."},
             {"speaker": "A", "start": 3.0, "end": 5.0, "text": "Hello world indeed."},
         ]
         result = deduplicate_overlaps(segments)
-        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result), 1)
 
-    def test_distinct_speakers_not_combined(self):
+    def test_distinct_speakers_kept(self):
         segments = [
             {"speaker": "A", "start": 0.0, "end": 5.0, "text": "Hello world."},
             {"speaker": "B", "start": 3.0, "end": 5.0, "text": "Hello world."},
         ]
         result = deduplicate_overlaps(segments)
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result), 2)
+
+    def test_contained_different_speaker_kept(self):
+        segments = [
+            {"speaker": "A", "start": 0.0, "end": 5.0, "text": "Hello world."},
+            {"speaker": "B", "start": 3.0, "end": 5.0, "text": "Hello world indeed."},
+        ]
+        result = deduplicate_overlaps(segments)
+        self.assertEqual(len(result), 2)
 
     def test_empty_input(self):
         result = deduplicate_overlaps([])

@@ -423,6 +423,9 @@ Long-audio and retry options:
 --request-timeout 600        (per-request timeout in seconds)
 --max-attempts 2             (API attempts per chunk, including first)
 --retries N                  (deprecated; maps to --max-attempts)
+--workers 1                  (chunks transcribed in parallel)
+--max-failed-chunks 1        (stop after N terminal chunk failures)
+--max-total-attempts N       (stop after N total API attempts across chunks)
 ```
 
 Workflow control:

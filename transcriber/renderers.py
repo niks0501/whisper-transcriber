@@ -43,13 +43,13 @@ def transcript_text(items: list[dict[str, Any]]) -> str:
 
 
 def subtitle(items: list[dict[str, Any]], vtt: bool = False) -> str:
-    blocks = ["WEBVTT\n"] if vtt else []
+    blocks = ["WEBVTT"] if vtt else []
     for i, item in enumerate(items, 1):
         start = clock(item["start"], True, vtt)
         end = clock(max(item["end"], item["start"] + 0.1), True, vtt)
         body = f"{item['speaker']}: {item['text']}"
         if vtt:
-            blocks.append(f"{start} --> {end}\n{body}\n")
+            blocks.append(f"{start} --> {end}\n{body}")
         else:
-            blocks.append(f"{i}\n{start} --> {end}\n{body}\n")
-    return "\n".join(blocks).rstrip() + "\n"
+            blocks.append(f"{i}\n{start} --> {end}\n{body}")
+    return "\n\n".join(blocks) + "\n"

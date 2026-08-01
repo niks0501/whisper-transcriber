@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -84,18 +85,37 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def atomic_write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(value, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
     temp.replace(path)
+    _fsync_dir(path.parent)
 
 
 def atomic_write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(value, encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as f:
+        f.write(value)
+        f.flush()
+        os.fsync(f.fileno())
     temp.replace(path)
+    _fsync_dir(path.parent)
 
 
 def atomic_read_json(path: Path) -> Any:
