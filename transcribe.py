@@ -23,7 +23,8 @@ SUPPORTED = {".flac", ".mp3", ".mp4", ".mpeg", ".mpga", ".m4a", ".ogg", ".wav", 
 EXPORTS = {"txt", "json", "srt", "vtt"}
 
 PROFILES = {
-    "interview": "gpt-4o-transcribe-diarize",
+    "interview": "muse-voice-transcribe-1.0",
+    "openai-interview": "gpt-4o-transcribe-diarize",
     "accurate": "gpt-4o-transcribe",
     "budget": "gpt-4o-mini-transcribe",
     "legacy": "whisper-1",
@@ -49,11 +50,6 @@ def main(argv: list[str] | None = None) -> int:
         if not source.is_file() or source.suffix.lower() not in SUPPORTED:
             raise ValueError(f"Unsupported or missing audio file: {source}")
 
-        if not os.getenv("OPENAI_API_KEY"):
-            raise RuntimeError(
-                "OPENAI_API_KEY is missing. Copy .env.example to .env and add the key."
-            )
-
         require_binary("ffmpeg")
         require_binary("ffprobe")
 
@@ -61,6 +57,17 @@ def main(argv: list[str] | None = None) -> int:
         model = args.model or PROFILES[profile]
         language = None if not args.language or args.language.lower() == "auto" else args.language
         style = args.transcript_style or "both"
+
+        if model == "muse-voice-transcribe-1.0":
+            if not (os.getenv("MODEL_API_KEY") or os.getenv("META_API_KEY")):
+                raise RuntimeError(
+                    "Meta API key is missing. Set MODEL_API_KEY or META_API_KEY in .env."
+                )
+        elif not os.getenv("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is missing. Copy .env.example to .env and add the key."
+            )
+
         exports = {x.strip().lower() for x in args.export.split(",") if x.strip()}
         if exports - EXPORTS:
             raise ValueError(f"Unsupported exports: {', '.join(sorted(exports - EXPORTS))}")
@@ -98,10 +105,19 @@ def main(argv: list[str] | None = None) -> int:
 
         if speakers and model != "gpt-4o-transcribe-diarize":
             print(
-                "Warning: --speaker references are only used by the diarize profile "
-                f"({PROFILES['interview']}); ignoring them for model {model}.",
+                "Warning: --speaker references are only used by the OpenAI diarize profile "
+                f"({PROFILES['openai-interview']}); ignoring them for model {model}.",
                 file=sys.stderr,
             )
+
+        if model == "muse-voice-transcribe-1.0" and not os.getenv("OPENAI_API_KEY"):
+            if not args.transcribe_only and (style in {"readable", "both"} or args.glossary or args.analyze):
+                print(
+                    "Warning: Muse transcription will work, but readable cleanup and research "
+                    "analysis still use OPENAI_TEXT_MODEL. Without OPENAI_API_KEY those optional "
+                    "post-processing stages will be skipped after reporting an error.",
+                    file=sys.stderr,
+                )
 
         speaker_labels: dict[str, str] = {}
         for value in args.speaker_label:
