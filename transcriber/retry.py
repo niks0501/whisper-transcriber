@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+import httpx
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -25,7 +26,19 @@ def is_retryable(exc: Exception) -> bool:
         return True
     if isinstance(exc, APIStatusError):
         code = exc.status_code
-        if code in (408, 409):
+        if code in (408, 409, 429):
+            return True
+        if 500 <= code < 600:
+            return True
+        if 400 <= code < 500:
+            return False
+    if isinstance(exc, httpx.TimeoutException):
+        return True
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code in (408, 409, 429):
             return True
         if 500 <= code < 600:
             return True
@@ -38,6 +51,8 @@ def error_name(exc: Exception) -> str:
     name = type(exc).__name__
     if isinstance(exc, APIStatusError):
         return f"{name}({exc.status_code})"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{name}({exc.response.status_code})"
     return name
 
 
