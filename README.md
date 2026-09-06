@@ -2,23 +2,27 @@
 
 A command-line transcriber for recorded interviews, meetings, and thesis research.
 
-The default workflow uses `gpt-4o-transcribe-diarize` to detect who spoke and when. It preserves the raw API response, creates speaker-labelled transcripts and subtitles, resumes interrupted runs, and can optionally generate a readable copy and thesis research notes.
+The default interview profile uses Meta Muse Voice Transcribe with speaker diarization and timestamps.
+OpenAI transcription profiles remain available as fallbacks.
+The tool preserves raw transcription results, creates speaker-labelled transcripts and subtitles, resumes interrupted runs, and can optionally generate a readable copy and thesis research notes.
 
 ## Highlights
 
 - One-command basic transcription
+- Meta Muse Voice Transcribe as the default interview model
+- Taglish language bias for English and Tagalog interviews
 - Guided terminal wizard
 - Advanced thesis command
 - Automatic speaker diarization and timestamps
-- Optional known-speaker reference samples
+- Optional known-speaker reference samples through the OpenAI diarization profile
 - Interactive or command-based speaker renaming
 - Retry and resume support with per-chunk checkpoints
-- **Duration-aware chunking** for long recordings (5-minute chunks by default)
-- **Controlled retry policy** with automatic retry disabled in the SDK
-- **Provisional outputs** visible after every completed chunk
-- **Persistent manifest** with fingerprint validation to prevent mis-matched resumption
-- **Post-process isolation** — transcription completes independently of cleanup/analysis
-- **Status command** (`--status`) to inspect runs in progress
+- Duration-aware chunking for long recordings, with 5-minute chunks by default
+- Controlled retry policy with automatic SDK retries disabled
+- Provisional outputs visible after every completed chunk
+- Persistent manifest with fingerprint validation to prevent mismatched resumption
+- Post-process isolation so transcription completes independently of cleanup and analysis
+- Status command (`--status`) to inspect runs in progress
 - TXT, JSON, SRT, and VTT exports
 - Verbatim and readable transcript copies
 - Sugarcane terminology glossary review
@@ -27,15 +31,20 @@ The default workflow uses `gpt-4o-transcribe-diarize` to detect who spoke and wh
 
 ## Privacy notice
 
-This tool uploads the selected recording to the OpenAI API for processing. Obtain the required consent before uploading an interview.
+This tool uploads the selected recording to the API used by the selected transcription profile.
+The default `interview` profile sends audio to the Meta Model API.
+OpenAI profiles send audio to the OpenAI API.
+Obtain the required consent before uploading an interview.
 
-Raw recordings, speaker samples, `.env`, private configuration, and generated transcripts are ignored by Git. Do not force-add sensitive research material.
+Raw recordings, speaker samples, `.env`, private configuration, and generated transcripts are ignored by Git.
+Do not force-add sensitive research material.
 
 ## Requirements
 
 - Python 3.10 or newer
 - FFmpeg and FFprobe
-- An OpenAI API key
+- A Meta Model API key for the default Muse transcription profile
+- An OpenAI API key only if you use OpenAI transcription profiles or OpenAI text post-processing
 
 ## Installation
 
@@ -49,10 +58,16 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Open `.env` and replace the placeholder:
+Open `.env` and add your Meta Model API key:
 
 ```env
-OPENAI_API_KEY=your_api_key_here
+MODEL_API_KEY=LLM|your_meta_api_key_here
+```
+
+If you also want OpenAI transcription profiles, readable cleanup, or thesis analysis, add:
+
+```env
+OPENAI_API_KEY=your_openai_api_key_here
 OPENAI_TEXT_MODEL=gpt-4.1-mini
 ```
 
@@ -72,7 +87,46 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Then add your API key to `.env`.
+Then add your API key or keys to `.env`.
+
+## Meta Voice Transcribe
+
+Meta Muse Voice Transcribe is the default model for the `interview` profile.
+It supports speaker diarization and works well for interviews that switch between English and Tagalog.
+
+Add your Meta Model API key to `.env`:
+
+```env
+MODEL_API_KEY=LLM|your_meta_api_key_here
+```
+
+Run a normal interview transcription:
+
+```bash
+python transcribe.py "recordings/interview.m4a" --profile interview
+```
+
+For a Taglish interview, use the built-in English and Tagalog language bias:
+
+```bash
+python transcribe.py "recordings/interview.m4a" \
+  --profile interview \
+  --language taglish \
+  --map-speakers
+```
+
+If you only want the transcript and do not need OpenAI-powered cleanup or research analysis, add `--transcribe-only`:
+
+```bash
+python transcribe.py "recordings/interview.m4a" \
+  --profile interview \
+  --language taglish \
+  --transcribe-only
+```
+
+Muse labels speakers with values such as `A` and `B`.
+For long recordings split into multiple API requests, those labels are scoped to each request and may not represent the same person in every chunk.
+Review speaker labels before using quotations in research work.
 
 ## Three ways to run it
 
@@ -82,20 +136,22 @@ Then add your API key to `.env`.
 python transcribe.py "recordings\SRA-interview.m4a"
 ```
 
-This is the normal command. You only provide the raw recording.
+This is the normal command.
+You only provide the raw recording.
 
 Defaults:
 
 - profile: `interview`
-- model: `gpt-4o-transcribe-diarize`
+- model: `muse-voice-transcribe-1.0`
 - language: automatic detection
 - transcript copies: verbatim and readable
 - exports: TXT, JSON, SRT, and VTT
 - retries and resume: enabled
 - chunk size: 5 minutes with 2-second boundary overlap on long recordings
-- max attempts per chunk: 2 (one initial request plus one retry)
+- max attempts per chunk: 2, including the first request
 
-Without voice references, detected voices are labelled automatically. The exact raw label may be `A`, `B`, `Speaker A`, or another model-provided label.
+Detected voices are labelled automatically.
+The raw label may be `A`, `B`, or another model-provided label.
 
 ### 2. Guided wizard
 
@@ -105,23 +161,23 @@ python transcribe.py --wizard
 
 The wizard asks for:
 
-- raw audio path;
-- transcription profile;
-- language;
-- optional 2–10 second speaker samples;
-- whether detected speakers should be renamed;
-- transcript style;
-- optional terminology glossary;
-- optional thesis analysis and research context.
+- raw audio path
+- transcription profile
+- language
+- whether detected speakers should be renamed
+- transcript style
+- optional terminology glossary
+- optional thesis analysis and research context
+
+The OpenAI interview profile also supports optional 2 to 10 second known-speaker samples.
 
 ### 3. Advanced thesis command
 
 ```powershell
 python transcribe.py "recordings\SRA-interview.m4a" `
   --profile interview `
-  --language auto `
-  --speaker "Interviewer=speaker_references\nikko.wav" `
-  --speaker "SRA Staff=speaker_references\sra-staff.wav" `
+  --language taglish `
+  --map-speakers `
   --glossary "config\sugarcane-glossary.txt" `
   --transcript-style both `
   --export txt,json,srt,vtt `
@@ -129,19 +185,20 @@ python transcribe.py "recordings\SRA-interview.m4a" `
   --research-context "config\caneguard-thesis.yaml"
 ```
 
-This transcribes the interview, identifies known voices where possible, produces transcript and subtitle files, checks specialist terminology, and creates thesis-oriented research notes.
+This transcribes the interview, separates speakers, produces transcript and subtitle files, checks specialist terminology, and creates thesis-oriented research notes.
 
 ## Speaker separation
 
 ### Automatic diarization
 
-No `--speaker` option is required:
+No `--speaker` option is required for the default Muse profile:
 
 ```powershell
 python transcribe.py "recordings\SRA-interview.m4a"
 ```
 
-The model separates voices and returns timestamped segments. It does not automatically know which person is the interviewer unless you provide references or rename the labels.
+Muse separates voices and returns timestamped turns.
+It does not automatically know which person is the interviewer, so review or rename the detected labels.
 
 ### Rename speakers after transcription
 
@@ -161,13 +218,17 @@ python transcribe.py "recordings\SRA-interview.m4a" `
 
 ### Known-speaker samples
 
+Known-speaker reference clips are supported by the `openai-interview` profile, not Muse.
+
 ```powershell
 python transcribe.py "recordings\SRA-interview.m4a" `
+  --profile openai-interview `
   --speaker "Interviewer=speaker_references\nikko.wav" `
   --speaker "SRA Staff=speaker_references\sra-staff.wav"
 ```
 
-Each sample must contain only that person's voice and must be between 2 and 10 seconds. Up to four known speakers can be supplied.
+Each sample must contain only that person's voice and must be between 2 and 10 seconds.
+Up to four known speakers can be supplied.
 
 The transcriber validates each reference before uploading it.
 
@@ -175,14 +236,17 @@ The transcriber validates each reference before uploading it.
 
 | Profile | Model | Best use |
 |---|---|---|
-| `interview` | `gpt-4o-transcribe-diarize` | Interviews requiring speakers and timestamps |
-| `accurate` | `gpt-4o-transcribe` | High-quality plain transcription |
-| `budget` | `gpt-4o-mini-transcribe` | Lower-cost plain transcription |
+| `interview` | `muse-voice-transcribe-1.0` | Default interviews with Muse diarization and timestamps |
+| `openai-interview` | `gpt-4o-transcribe-diarize` | OpenAI diarization and known-speaker references |
+| `accurate` | `gpt-4o-transcribe` | High-quality plain OpenAI transcription |
+| `budget` | `gpt-4o-mini-transcribe` | Lower-cost plain OpenAI transcription |
 | `legacy` | `whisper-1` | Compatibility with the old workflow |
 
 Examples:
 
 ```powershell
+python transcribe.py "audio.m4a" --profile interview
+python transcribe.py "audio.m4a" --profile openai-interview
 python transcribe.py "audio.m4a" --profile accurate
 python transcribe.py "audio.m4a" --profile budget
 python transcribe.py "audio.m4a" --profile legacy
@@ -191,15 +255,21 @@ python transcribe.py "audio.m4a" --profile legacy
 Override the profile model:
 
 ```powershell
-python transcribe.py "audio.m4a" --model gpt-4o-transcribe-diarize
+python transcribe.py "audio.m4a" --model muse-voice-transcribe-1.0
 ```
 
 ## Language
 
-Automatic or Taglish/mixed-language starting point:
+Automatic or mixed-language detection:
 
 ```powershell
 python transcribe.py "audio.m4a" --language auto
+```
+
+Taglish with English and Tagalog language bias:
+
+```powershell
+python transcribe.py "audio.m4a" --language taglish
 ```
 
 English:
@@ -234,7 +304,8 @@ Both, recommended for thesis interviews:
 python transcribe.py "audio.m4a" --transcript-style both
 ```
 
-The readable copy is produced by a text model instructed to preserve all speakers, timestamps, claims, numbers, uncertainty, and language choices. Verify it against the raw transcript before quoting or publishing it.
+The readable copy is produced by a text model instructed to preserve all speakers, timestamps, claims, numbers, uncertainty, and language choices.
+Verify it against the raw transcript before quoting or publishing it.
 
 ## Glossary
 
@@ -252,7 +323,8 @@ python transcribe.py "audio.m4a" `
   --transcript-style both
 ```
 
-The tool creates `review_flags.json` containing names and technical phrases that deserve human verification. These are text-review suggestions, not acoustic confidence scores.
+The tool creates `review_flags.json` containing names and technical phrases that deserve human verification.
+These are text-review suggestions, not acoustic confidence scores.
 
 ## Thesis research analysis
 
@@ -272,13 +344,14 @@ python transcribe.py "recordings\SRA-interview.m4a" `
 
 The research report includes:
 
-- interview summary;
-- themes and subthemes;
-- key quotations with speaker and timestamp;
-- question-and-answer map;
-- possible follow-up questions.
+- interview summary
+- themes and subthemes
+- key quotations with speaker and timestamp
+- question-and-answer map
+- possible follow-up questions
 
-The result is an AI-assisted research aid, not final qualitative coding. Verify all quotations and interpretations against the source recording.
+The result is an AI-assisted research aid, not final qualitative coding.
+Verify all quotations and interpretations against the source recording.
 
 Override the text model used for readable cleanup and analysis:
 
@@ -314,9 +387,10 @@ The source file's SHA-256 checksum prevents accidental reuse of an output folder
 
 ## Large recordings
 
-Recordings longer than 5 minutes or larger than 20 MB are automatically split into speech-optimized chunks of approximately 5 minutes each. The original file is never modified.
+Recordings longer than 5 minutes or larger than 20 MB are automatically split into speech-optimized chunks of approximately 5 minutes each.
+The original file is never modified.
 
-- Duration-and-size-aware chunking (not size-only)
+- Duration-and-size-aware chunking, not size-only
 - Five-minute chunks with 2-second boundary overlap
 - Provisional transcript files appear after the first chunk completes
 - `Ctrl+C` preserves all completed chunks for safe resume
@@ -329,7 +403,8 @@ Advanced chunk tuning:
 python transcribe.py "audio.m4a" --chunk-seconds 300 --chunk-overlap-seconds 2
 ```
 
-When a large interview is divided into multiple requests, anonymous speaker labels may not remain consistent between chunks. Known-speaker samples improve consistency.
+Muse speaker labels are scoped to each transcription request.
+If an interview is split into several chunks, review speaker identity across chunk boundaries before using the transcript as research evidence.
 
 ### Inspect a running or completed transcription
 
@@ -345,7 +420,7 @@ This shows completed chunk count, processed duration, current stage, and any las
 python transcribe.py "recordings\SRA-interview.m4a" --postprocess-only
 ```
 
-This skips transcription entirely and re-runs readable cleanup, glossary review, and research analysis from existing outputs.
+This skips transcription entirely and reruns readable cleanup, glossary review, and research analysis from existing outputs.
 
 ## Output structure
 
@@ -367,26 +442,27 @@ transcription_output/
         └── results/
 ```
 
-Not every optional file is created on every run. During long-audio transcription, `.partial` files appear as chunks complete.
+Not every optional file is created on every run.
+During long-audio transcription, `.partial` files appear as chunks complete.
 
 Important files:
 
-- `raw_transcript.json`: model segments and raw API responses;
-- `run_manifest.json`: schema version, run fingerprint, source checksum, chunk statuses, stage progress, attempt records;
-- `verbatim_transcript.txt`: timestamped speaker-labelled transcript;
-- `readable_transcript.txt`: optional cleaned copy;
-- `transcript.srt` and `transcript.vtt`: subtitles for review;
-- `review_flags.json`: terminology requiring manual checking;
-- `research_analysis.md`: optional thesis research notes.
+- `raw_transcript.json`: model segments and raw API responses
+- `run_manifest.json`: schema version, run fingerprint, source checksum, chunk statuses, stage progress, and attempt records
+- `verbatim_transcript.txt`: timestamped speaker-labelled transcript
+- `readable_transcript.txt`: optional cleaned copy
+- `transcript.srt` and `transcript.vtt`: subtitles for review
+- `review_flags.json`: terminology requiring manual checking
+- `research_analysis.md`: optional thesis research notes
 
 ### Manifest
 
-The `run_manifest.json` now uses schema version 2 and contains:
+The `run_manifest.json` uses schema version 2 and contains:
 
-- **Run fingerprint**: a deterministic hash of source, model, language, speaker references, chunk policy, and request settings. Mismatches prevent accidental reuse.
-- **Chunk records**: per-chunk status, attempt history with timing, raw result paths, and segment counts.
-- **Stage status**: transcription, rendering, readable, glossary, and analysis each track their own state (`pending`, `running`, `completed`, or `failed`).
-- **Atomic writes**: the manifest is never left in a partial state on disk.
+- Run fingerprint: a deterministic hash of source, model, language, speaker references, chunk policy, and request settings
+- Chunk records: per-chunk status, attempt history with timing, raw result paths, and segment counts
+- Stage status: transcription, rendering, readable, glossary, and analysis each track their own state (`pending`, `running`, `completed`, or `failed`)
+- Atomic writes: the manifest is never left in a partial state on disk
 
 ## Command reference
 
@@ -398,9 +474,9 @@ Common options:
 
 ```text
 --wizard
---profile interview|accurate|budget|legacy
+--profile interview|openai-interview|accurate|budget|legacy
 --model MODEL_ID
---language auto|en|tl|...
+--language auto|taglish|en|tl|...
 --speaker "NAME=REFERENCE_FILE"
 --speaker-label "RAW_LABEL=DISPLAY_NAME"
 --map-speakers
@@ -450,7 +526,8 @@ The old script name remains available:
 python transcribe_auto_split.py "recordings\SRA-interview.m4a"
 ```
 
-It forwards all arguments to the new CLI. Editing a hard-coded `INPUT_FILE` variable is no longer necessary.
+It forwards all arguments to the new CLI.
+Editing a hard-coded `INPUT_FILE` variable is no longer necessary.
 
 ## Testing
 
@@ -460,4 +537,5 @@ python -m unittest discover -s tests -v
 python transcribe.py --help
 ```
 
-The unit and integration tests do not call the OpenAI API or upload audio. Integration tests use a fake client to verify chunk planning, retry classification, manifest persistence, overlap deduplication, and configuration fingerprint validation.
+The unit and integration tests do not call the Meta or OpenAI APIs or upload audio.
+Integration tests use fake clients to verify chunk planning, retry classification, manifest persistence, overlap deduplication, and configuration fingerprint validation.

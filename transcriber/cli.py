@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any
 
 PROFILES = {
-    "interview": "gpt-4o-transcribe-diarize",
+    "interview": "muse-voice-transcribe-1.0",
+    "openai-interview": "gpt-4o-transcribe-diarize",
     "accurate": "gpt-4o-transcribe",
     "budget": "gpt-4o-mini-transcribe",
     "legacy": "whisper-1",
@@ -28,12 +29,12 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--wizard", action="store_true", help="Open the guided setup wizard")
 
     p.add_argument("--profile", choices=PROFILES, default=None,
-                   help="Named model profile: interview, accurate, budget, legacy")
+                   help="Named model profile: interview, openai-interview, accurate, budget, legacy")
     p.add_argument("--model", help="Override the selected transcription model")
-    p.add_argument("--language", help="ISO language code, such as en or tl; use auto for detection")
+    p.add_argument("--language", help="Language hint such as auto, taglish, en, or tl")
 
     p.add_argument("--speaker", action="append", default=[], metavar="NAME=FILE",
-                   help="Known speaker 2-10 second reference; repeatable")
+                   help="Known speaker 2-10 second reference; OpenAI diarize profile only")
     p.add_argument("--speaker-label", action="append", default=[], metavar="RAW=DISPLAY",
                    help="Rename detected labels, e.g. A=Interviewer")
     p.add_argument("--map-speakers", action="store_true",
@@ -109,29 +110,33 @@ def assignment(value: str, option: str) -> tuple[str, str]:
 
 
 def wizard(args: argparse.Namespace) -> argparse.Namespace:
-    print("\nWhisper Transcriber — Interview Wizard")
+    print("\nWhisper Transcriber - Interview Wizard")
     if not args.audio:
         args.audio = input("\nRaw audio/video path:\n> ").strip().strip('"')
 
     profile = choose("Profile:", [
-        "Interview with automatic speaker separation",
-        "Accurate plain transcription",
-        "Lower-cost plain transcription",
+        "Muse Voice interview with automatic speaker separation",
+        "OpenAI interview with automatic speaker separation",
+        "OpenAI accurate plain transcription",
+        "OpenAI lower-cost plain transcription",
         "Legacy Whisper",
     ])
-    args.profile = ["interview", "accurate", "budget", "legacy"][profile - 1]
+    args.profile = ["interview", "openai-interview", "accurate", "budget", "legacy"][profile - 1]
 
     language = choose("Language:", [
         "Automatic or mixed language",
+        "Taglish (English + Tagalog bias)",
         "English",
         "Tagalog",
-        "Another ISO code",
+        "Another language code",
     ])
-    args.language = ["auto", "en", "tl", None][language - 1]
-    if language == 4:
+    args.language = ["auto", "taglish", "en", "tl", None][language - 1]
+    if language == 5:
         args.language = input("Language code:\n> ").strip()
 
     if args.profile == "interview":
+        args.map_speakers = yes_no("Rename Muse speaker labels after transcription?", True)
+    elif args.profile == "openai-interview":
         if yes_no("Do you have clean 2-10 second speaker samples?"):
             while True:
                 name = input("Speaker label (for example Interviewer):\n> ").strip()

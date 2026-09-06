@@ -25,7 +25,7 @@ def plan_chunks(info: MediaInfo, source_path: Path, policy: ChunkPolicy) -> list
                 "start_seconds": 0.0,
                 "end_seconds": info.duration_seconds,
                 "overlap_before_seconds": 0.0,
-                "path": str(source_path),
+                "path": None,
                 "sha256": None,
             }
         ]
@@ -73,7 +73,7 @@ def extract_chunk(
 
     work_dir.mkdir(parents=True, exist_ok=True)
     chunk_id = plan_item["id"]
-    output_path = work_dir / f"{chunk_id}.mp3"
+    output_path = work_dir / f"{chunk_id}.wav"
 
     start = plan_item["start_seconds"]
     duration = plan_item["end_seconds"] - plan_item["start_seconds"]
@@ -84,9 +84,10 @@ def extract_chunk(
         "-i", str(source),
         "-t", str(duration),
         "-vn",
-        "-ac", str(policy.channels),
+        "-ac", "1",
         "-ar", str(policy.sample_rate),
-        "-b:a", policy.audio_bitrate,
+        "-c:a", "pcm_s16le",
+        "-map_metadata", "-1",
         str(output_path),
     ]
     run_command(cmd)
